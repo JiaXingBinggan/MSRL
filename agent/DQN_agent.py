@@ -21,37 +21,6 @@ class DQN(nn.Cell):
         return self.net(s)
 
 
-class DQNTrainer:
-    def __init__(
-            self,
-            n_actions,
-            n_features,
-            learning_rate=0.01,
-            reward_decay=0.9,
-            e_greedy=0.9,
-            replace_target_iter=300,
-            memory_size=500,
-            batch_size=32,
-            e_greedy_increment=None,
-    ):
-        self.n_actions = n_actions
-        self.n_features = n_features
-        self.lr = learning_rate
-        self.gamma = reward_decay
-        self.epsilon_max = e_greedy
-        self.replace_target_iter = replace_target_iter
-        self.memory_size = memory_size
-        self.batch_size = batch_size
-        self.epsilon_increment = e_greedy_increment
-        self.epsilon = 0 if e_greedy_increment is not None else self.epsilon_max
-
-        # total learning step
-        self.learn_step_counter = 0
-
-        # 将经验池<状态-动作-奖励-下一状态>中的转换组初始化为0
-        self.memory = np.zeros((self.memory_size, self.n_features * 2 + 2))  # 状态的特征数*2加上动作和奖励
-
-
 # Deep Q Network off-policy
 class DeepQNetwork:
     def __init__(
@@ -65,7 +34,6 @@ class DeepQNetwork:
             memory_size=500,
             batch_size=3,
             e_greedy_increment=None,
-            output_graph=False,
     ):
         self.n_actions = n_actions
         self.n_features = n_features
@@ -93,6 +61,12 @@ class DeepQNetwork:
             self.memory_counter = 0
 
         self.opt = nn.Adam(self.eval_net.trainable_params(), learning_rate=self.lr, weight_decay=0.0)
+
+        self.eval_net.set_grad()
+        self.sens = 1.0
+        self.weights = self.opt.parameters
+        self.grad = ops.GradOperation(get_by_list=True, sens_param=True)
+        self.grad_reducer = ops.identity
 
     def store_transition(self, transition):
         index = self.memory_counter % self.memory_size
@@ -130,9 +104,11 @@ class DeepQNetwork:
         q_next = ops.ReduceMax(keep_dims=True)(self.target_net(b_s_), 1)
 
         q_target = b_r + self.gamma * q_next
-
         loss = self.loss_func(q_eval, q_target)
-
+        grads = self.grad(self.eval_net, self.weights)(*b_s, self.sens)
+        grads = self.grad_reducer(grads)
+        self.opt(grads)
+        print(loss)
 
         # increasing epsilon
         self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon < self.epsilon_max else self.epsilon_max
