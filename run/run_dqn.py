@@ -1,3 +1,5 @@
+import numpy as np
+
 from env.env import Maze
 from agent.DQN_agent import DeepQNetwork
 
@@ -18,7 +20,8 @@ def run_maze():
             # RL take action and get next observation and reward
             observation_, reward, done = env.step(action)
 
-            RL.store_transition(observation, action, reward, observation_)
+            transition = np.hstack((observation, action, reward, observation_))
+            RL.store_transition(transition)
 
             if (step > 200) and (step % 5 == 0):
                 RL.learn()
@@ -49,4 +52,3 @@ if __name__ == "__main__":
                       )
     env.after(100, run_maze)
     env.mainloop()
-    RL.plot_cost()
