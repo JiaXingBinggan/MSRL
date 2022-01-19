@@ -18,7 +18,33 @@ class DQN(nn.Cell):
         )
 
     def construct(self, s):
+        print(s)
+        print(self.net(s))
         return self.net(s)
+
+
+class DQNLossCell(nn.Cell):
+    def __init__(self, eval_network, target_network, n_features, gamma):
+        super(DQNLossCell, self).__init__()
+        self.eval_net = eval_network
+        self.target_net = target_network
+        self.n_features = n_features
+        self.gamma = gamma
+        self.loss_func = nn.MSELoss()
+
+    def construct(self, batch_memory):
+        b_s = batch_memory[:, :self.n_features]
+        b_a = ops.ExpandDims()(batch_memory[:, self.n_features], 1).astype(mindspore.int32)
+        b_r = ops.ExpandDims()(batch_memory[:, self.n_features + 1], 1)
+        b_s_ = batch_memory[:, -self.n_features:]
+
+        q_eval = ops.GatherD()(self.eval_net(b_s), 1, b_a)
+        q_next = ops.ReduceMax(keep_dims=True)(self.target_net(b_s_), 1)
+
+        q_target = b_r + self.gamma * q_next
+        loss = self.loss_func(q_eval, q_target)
+
+        return loss
 
 
 # Deep Q Network off-policy
@@ -55,14 +81,13 @@ class DeepQNetwork:
         self.eval_net = DQN(self.n_features, self.n_actions)
         self.target_net = copy.deepcopy(self.eval_net)
 
-        self.loss_func = nn.MSELoss()
-
         if not hasattr(self, 'memory_counter'):
             self.memory_counter = 0
 
         self.opt = nn.Adam(self.eval_net.trainable_params(), learning_rate=self.lr, weight_decay=0.0)
 
         self.eval_net.set_grad()
+        self.dqn_loss_cell = DQNLossCell(self.eval_net, self.target_net, self.n_features, self.gamma)
         self.sens = 1.0
         self.weights = self.opt.parameters
         self.grad = ops.GradOperation(get_by_list=True, sens_param=True)
@@ -94,18 +119,10 @@ class DeepQNetwork:
         else:
             sample_index = np.random.choice(self.memory_counter, size=self.batch_size, replace=False)
 
-        batch_memory = self.memory[sample_index, :]
-        b_s = Tensor(batch_memory[:, :self.n_features], mindspore.float32)
-        b_a = ops.ExpandDims()(Tensor(batch_memory[:, self.n_features], mindspore.int32), 1)
-        b_r = ops.ExpandDims()(Tensor(batch_memory[:, self.n_features + 1], mindspore.int32), 1)
-        b_s_ = Tensor(batch_memory[:, -self.n_features:], mindspore.float32)
-
-        q_eval = ops.GatherD()(self.eval_net(b_s), 1, b_a)
-        q_next = ops.ReduceMax(keep_dims=True)(self.target_net(b_s_), 1)
-
-        q_target = b_r + self.gamma * q_next
-        loss = self.loss_func(q_eval, q_target)
-        grads = self.grad(self.eval_net, self.weights)(*b_s, self.sens)
+        batch_memory = Tensor(self.memory[sample_index, :], mindspore.float32)
+        loss = self.dqn_loss_cell(batch_memory)
+        b_s = batch_memory[:, :self.n_features]
+        grads = self.grad(self.eval_net, self.weights)(b_s, self.sens)
         grads = self.grad_reducer(grads)
         self.opt(grads)
         print(loss)
