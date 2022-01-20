@@ -1,10 +1,21 @@
 import numpy as np
 import mindspore
 from mindspore import context, ops, Tensor, nn
+from mindspore.common.parameter import Parameter, ParameterTuple
 import copy
 
 
 context.set_context(mode=context.PYNATIVE_MODE, device_target="CPU")
+
+
+_update_op = ops.MultitypeFuncGraph("update_op")
+
+
+@_update_op.register("Tensor", "Tensor")
+def _parameter_update(policy_param, target_param):
+    assign = ops.Assign()
+    output = assign(target_param, policy_param)
+    return output
 
 
 class DQN(nn.Cell):
@@ -18,34 +29,25 @@ class DQN(nn.Cell):
         )
 
     def construct(self, s):
-        print(s)
-        print(self.net(s))
         return self.net(s)
 
 
-class DQNLossCell(nn.Cell):
-    def __init__(self, eval_network, target_network, n_features, gamma):
-        super(DQNLossCell, self).__init__()
-        self.eval_net = eval_network
-        self.target_net = target_network
-        self.n_features = n_features
-        self.gamma = gamma
-        self.loss_func = nn.MSELoss()
+class PolicyNetWithLossCell(nn.Cell):
+    """DQN policy network with loss cell"""
 
-    def construct(self, batch_memory):
-        b_s = batch_memory[:, :self.n_features]
-        b_a = ops.ExpandDims()(batch_memory[:, self.n_features], 1).astype(mindspore.int32)
-        b_r = ops.ExpandDims()(batch_memory[:, self.n_features + 1], 1)
-        b_s_ = batch_memory[:, -self.n_features:]
+    def __init__(self, backbone, loss_fn):
+        super(PolicyNetWithLossCell,
+              self).__init__(auto_prefix=False)
+        self._backbone = backbone
+        self._loss_fn = loss_fn
+        self.gather = ops.GatherD()
 
-        q_eval = ops.GatherD()(self.eval_net(b_s), 1, b_a)
-        q_next = ops.ReduceMax(keep_dims=True)(self.target_net(b_s_), 1)
-
-        q_target = b_r + self.gamma * q_next
-        loss = self.loss_func(q_eval, q_target)
-
+    def construct(self, x, a0, label):
+        """constructor for Loss Cell"""
+        out = self._backbone(x)
+        out = self.gather(out, 1, a0)
+        loss = self._loss_fn(out, label)
         return loss
-
 
 # Deep Q Network off-policy
 class DeepQNetwork:
@@ -80,18 +82,21 @@ class DeepQNetwork:
 
         self.eval_net = DQN(self.n_features, self.n_actions)
         self.target_net = copy.deepcopy(self.eval_net)
+        self.policy_param = ParameterTuple(
+            self.eval_net.get_parameters())
+        self.target_param = ParameterTuple(
+            self.target_net.get_parameters())
 
         if not hasattr(self, 'memory_counter'):
             self.memory_counter = 0
 
-        self.opt = nn.Adam(self.eval_net.trainable_params(), learning_rate=self.lr, weight_decay=0.0)
+        loss_func = nn.MSELoss()
+        opt = nn.Adam(self.eval_net.trainable_params(), learning_rate=self.lr)
+        loss_q_net = PolicyNetWithLossCell(self.eval_net, loss_func)
+        self.policy_network_train = nn.TrainOneStepCell(loss_q_net, opt)
+        self.policy_network_train.set_train(mode=True)
 
-        self.eval_net.set_grad()
-        self.dqn_loss_cell = DQNLossCell(self.eval_net, self.target_net, self.n_features, self.gamma)
-        self.sens = 1.0
-        self.weights = self.opt.parameters
-        self.grad = ops.GradOperation(get_by_list=True, sens_param=True)
-        self.grad_reducer = ops.identity
+        self.hyper_map = ops.HyperMap()
 
     def store_transition(self, transition):
         index = self.memory_counter % self.memory_size
@@ -110,9 +115,17 @@ class DeepQNetwork:
             action = np.random.randint(0, self.n_actions)
         return action
 
+    def update_param(self):
+        assign_result = self.hyper_map(
+            _update_op,
+            self.policy_param,
+            self.target_param
+        )
+        return assign_result
+
     def learn(self):
         if self.learn_step_counter % self.replace_target_iter == 0:
-            self.eval_net.load_parameter_slice(self.target_net.parameters_dict())
+            self.update_param()
 
         if self.memory_counter > self.memory_size:
             sample_index = np.random.choice(self.memory_size, size=self.batch_size, replace=False)
@@ -120,16 +133,21 @@ class DeepQNetwork:
             sample_index = np.random.choice(self.memory_counter, size=self.batch_size, replace=False)
 
         batch_memory = Tensor(self.memory[sample_index, :], mindspore.float32)
-        loss = self.dqn_loss_cell(batch_memory)
         b_s = batch_memory[:, :self.n_features]
-        grads = self.grad(self.eval_net, self.weights)(b_s, self.sens)
-        grads = self.grad_reducer(grads)
-        self.opt(grads)
-        print(loss)
+        b_a = ops.ExpandDims()(batch_memory[:, self.n_features], 1).astype(mindspore.int32)
+        b_r = ops.ExpandDims()(batch_memory[:, self.n_features + 1], 1)
+        b_s_ = batch_memory[:, -self.n_features:]
+
+        q_next = self.target_net(b_s_).max(axis=1)
+        q_target = b_r + self.gamma * q_next
+
+        loss = self.policy_network_train(b_s, b_a, q_target)
 
         # increasing epsilon
         self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon < self.epsilon_max else self.epsilon_max
         self.learn_step_counter += 1
+
+        return loss
 
 
 
