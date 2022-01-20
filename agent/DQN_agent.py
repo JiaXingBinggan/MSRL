@@ -25,7 +25,8 @@ class DQN(nn.Cell):
         super(DQN, self).__init__()
         self.net = nn.SequentialCell(
             nn.Dense(n_features, self.neuron_nums),
-            nn.Dense(self.neuron_nums, n_actions)
+            nn.ReLU(),
+            nn.Dense(self.neuron_nums, n_actions),
         )
 
     def construct(self, s):
@@ -97,6 +98,7 @@ class DeepQNetwork:
         self.policy_network_train.set_train(mode=True)
 
         self.hyper_map = ops.HyperMap()
+        self.cost_his = []
 
     def store_transition(self, transition):
         index = self.memory_counter % self.memory_size
@@ -109,6 +111,7 @@ class DeepQNetwork:
     def choose_action(self, observation):
         observation = Tensor(observation[np.newaxis, :], mindspore.float32)
         if np.random.uniform() < self.epsilon:
+            self.eval_net.set_train(mode=False)
             action_v = self.eval_net(observation)
             action = np.argmax(action_v)
         else:
@@ -142,12 +145,20 @@ class DeepQNetwork:
         q_target = b_r + self.gamma * q_next
 
         loss = self.policy_network_train(b_s, b_a, q_target)
+        self.cost_his.append(round(float(np.mean(loss.asnumpy())), 3))
 
         # increasing epsilon
         self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon < self.epsilon_max else self.epsilon_max
         self.learn_step_counter += 1
 
         return loss
+
+    def plot_cost(self):
+        import matplotlib.pyplot as plt
+        plt.plot(np.arange(len(self.cost_his)), self.cost_his)
+        plt.ylabel('Cost')
+        plt.xlabel('training steps')
+        plt.show()
 
 
 

@@ -20,7 +20,7 @@ def run_maze():
 
             # RL take action and get next observation and reward
             observation_, reward, done = env.step(action)
-            rewards += 1
+            rewards += reward
             transition = np.hstack((observation, action, reward, observation_))
             RL.store_transition(transition)
 
@@ -55,3 +55,4 @@ if __name__ == "__main__":
                       )
     env.after(100, run_maze)
     env.mainloop()
+    RL.plot_cost()
